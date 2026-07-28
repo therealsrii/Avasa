@@ -33,7 +33,7 @@ beta_c = 19.1    # Cathode charge transfer coeff term (V^-1)
 beta_a = 19.1    # Anode charge transfer coeff term (V^-1)
 
 # Mass Transport (Copper Diffusion at Cathode)
-C_b = 600.0      # Bulk copper concentration (mol/m^3) -> ~38 g/L
+C_b = 15.74      # Bulk copper concentration (mol/m^3) corresponding to 1 g/L
 tau_diff = 15.0  # Diffusion time constant (s)
 delta = 1e-4     # Boundary layer thickness (m)
 F = 96485.0      # Faraday constant (C/mol)
