@@ -125,6 +125,12 @@ st.sidebar.subheader("Electrical & Chemical")
 I_target = st.sidebar.slider("Current (A)", min_value=10, max_value=500, value=150, step=10, help="Target current applied to the electrowinning cell (default is 150 A, corresponding to 150 A/m² on a 1m² active plate area).")
 kappa_cond = st.sidebar.slider("Electrolyte Conductivity (S/m)", min_value=10, max_value=120, value=70, step=5, help="Electrical conductivity of 20% H2SO4 with copper. Default is ~70 S/m.")
 
+st.sidebar.subheader("Parasitic Resistance & Contacts")
+R_contact_mohm = st.sidebar.slider("Contact Resistance (mΩ)", min_value=0.0, max_value=2.0, value=0.1, step=0.05, help="Electrical contact resistance at the busbar-to-hanger-bar junctions (anode + cathode).")
+R_plate_mohm = st.sidebar.slider("Electrode Plate Resistance (mΩ)", min_value=0.0, max_value=0.5, value=0.05, step=0.01, help="Internal resistance of the anode and cathode plates and hanger bars.")
+R_peripheral_mohm = st.sidebar.slider("Peripheral/Busbar Resistance (mΩ)", min_value=0.0, max_value=1.0, value=0.02, step=0.01, help="Ohmic resistance of inter-cell connectors, busbars, and cabling.")
+f_contact_heat_pct = st.sidebar.slider("Contact Heat Conducted to Bath (%)", min_value=0.0, max_value=100.0, value=50.0, step=5.0, help="Percentage of the contact resistance heat that conducts into the electrolyte bath via the hanger bars.")
+
 st.sidebar.subheader("Pulsing Parameters")
 f_pulse = st.sidebar.slider("Pulsing Frequency (Hz)", min_value=1.0, max_value=60.0, value=30.0, step=1.0, help="Operating pulsing frequency of the current.")
 D_pulse = st.sidebar.slider("Duty Cycle (D)", min_value=0.05, max_value=1.0, value=0.50, step=0.05, help="Operating duty cycle of the pulses.")
@@ -159,6 +165,12 @@ T_ref = 303.15   # Reference Temperature (K)
 
 # Calculated Resistance
 R_sol = d_gap / (kappa_cond * A_plate)
+
+# Additional Resistances (conversions to Ohms)
+R_contact = R_contact_mohm / 1000.0
+R_plate = R_plate_mohm / 1000.0
+R_peripheral = R_peripheral_mohm / 1000.0
+f_contact = f_contact_heat_pct / 100.0
 
 # ==========================================
 # SOLVER IMPLEMENTATION
@@ -212,6 +224,9 @@ def calculate_cell_metrics(f, D, mode_select, N_sets=1):
         I_p = float(I_target)
         I_avg = I_p * D
         
+    R_extra_voltage = R_plate + R_contact + R_peripheral
+    R_extra_heating = R_plate + f_contact * R_contact
+        
     if f == 0.0:
         # DC case
         eta_c = (1.0 / beta_c) * np.arcsinh(I_avg / (2 * I0_c))
@@ -220,8 +235,13 @@ def calculate_cell_metrics(f, D, mode_select, N_sets=1):
         Cs = np.maximum(1e-4 * C_b, C_b - K * tau_diff * I_avg)
         eta_conc = -(R_gas * T_ref / (2 * F)) * np.log(Cs / C_b)
         
-        V_cell_on = E_eq + eta_a + eta_c + eta_conc + I_avg * R_sol
-        Q_joule = N_sets * (I_avg**2 * R_sol)
+        V_cell_on_int = E_eq + eta_a + eta_c + eta_conc + I_avg * R_sol
+        V_cell_on_total = V_cell_on_int + I_avg * R_extra_voltage
+        
+        Q_joule_sol = N_sets * (I_avg**2 * R_sol)
+        Q_joule_extra = N_sets * (I_avg**2 * R_extra_heating)
+        Q_joule = Q_joule_sol + Q_joule_extra
+        
         Q_over = N_sets * (I_avg * (eta_a + eta_c + eta_conc))
         Q_chem = N_sets * (I_avg * (E_eq - E_tn))
         Q_gen = Q_joule + Q_over + Q_chem
@@ -230,10 +250,14 @@ def calculate_cell_metrics(f, D, mode_select, N_sets=1):
         eta_c_on, eta_a_on = solve_overpotentials_fast(I_p)
         eta_conc_on = solve_concentration_overpotential_on_fast(f, D, I_p)
         
-        V_cell_on = E_eq + eta_a_on + eta_c_on + eta_conc_on + I_p * R_sol
+        V_cell_on_int = E_eq + eta_a_on + eta_c_on + eta_conc_on + I_p * R_sol
+        V_cell_on_total = V_cell_on_int + I_p * R_extra_voltage
         
         # Joule heating: average current squared * R during on-time = D * I_p^2 * R = I_avg * I_p * R
-        Q_joule = N_sets * (D * I_p**2 * R_sol)
+        Q_joule_sol = N_sets * (D * I_p**2 * R_sol)
+        Q_joule_extra = N_sets * (D * I_p**2 * R_extra_heating)
+        Q_joule = Q_joule_sol + Q_joule_extra
+        
         Q_over = N_sets * (I_avg * (eta_a_on + eta_c_on + eta_conc_on))
         Q_chem = N_sets * (I_avg * (E_eq - E_tn))
         Q_gen = Q_joule + Q_over + Q_chem
@@ -249,7 +273,7 @@ def calculate_cell_metrics(f, D, mode_select, N_sets=1):
     else:
         dT = (Q_gen / UA) * (1.0 - np.exp(-(UA / mC) * t_run))
         
-    return V_cell_on, Q_joule, Q_over, Q_chem, Q_gen, dT
+    return V_cell_on_int, V_cell_on_total, Q_joule_sol, Q_joule_extra, Q_over, Q_chem, Q_gen, dT
 
 # ==========================================
 # MAIN PAGE LAYOUT
@@ -262,7 +286,8 @@ You can adjust the parameters in the sidebar to see how cell geometry, electrica
 """)
 
 # Calculate current active operating point metrics using the sidebar pulsing sliders
-V_on, P_joule, P_over, P_chem, P_gen, dT_final = calculate_cell_metrics(f_pulse, D_pulse, mode, N_sets)
+V_on_int, V_on_total, P_joule_sol, P_joule_extra, P_over, P_chem, P_gen, dT_final = calculate_cell_metrics(f_pulse, D_pulse, mode, N_sets)
+P_joule = P_joule_sol + P_joule_extra
 
 # Callout box for the whole bath forecast (N_sets)
 st.markdown(f"""
@@ -287,8 +312,8 @@ with col1:
     st.markdown(f"""
     <div class="metric-card">
         <div class="metric-label">Peak Cell Voltage</div>
-        <div class="metric-value">{V_on:.2f} V</div>
-        <div class="metric-subtext">Single cell voltage (on-pulse)</div>
+        <div class="metric-value">{V_on_total:.2f} V</div>
+        <div class="metric-subtext">Rectifier peak ({V_on_int:.2f} V internal)</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -297,7 +322,7 @@ with col2:
     <div class="metric-card">
         <div class="metric-label">System Joule Heat</div>
         <div class="metric-value">{P_joule/1000.0:.2f} kW</div>
-        <div class="metric-subtext">Total Ohmic resistance heat</div>
+        <div class="metric-subtext">Sol: {P_joule_sol/1000.0:.2f} kW | Parasitic: {P_joule_extra/1000.0:.2f} kW</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -343,7 +368,7 @@ with tab1:
     Z_grid = np.zeros_like(F_grid)
     for i in range(len(duties)):
         for j in range(len(freqs)):
-            _, _, _, _, _, dT = calculate_cell_metrics(F_grid[i, j], D_grid[i, j], mode, N_sets)
+            *_, dT = calculate_cell_metrics(F_grid[i, j], D_grid[i, j], mode, N_sets)
             Z_grid[i, j] = dT
             
     # Calculate DC for plotting at f=0 boundary if desired
@@ -453,7 +478,11 @@ with tab2:
     ### 1. Cell Electrical Model and Overpotentials
     The transient voltage required to drive the electrowinning cell is modeled as:
     
-    $$V_{cell}(t) = E_{eq} + \eta_a(t) + \eta_c(t) + \eta_{conc}(t) + I(t) R_{sol}$$
+    $$V_{cell, total}(t) = V_{cell, internal}(t) + I(t) \cdot (R_{plate} + R_{contact} + R_{peripheral})$$
+    
+    where:
+    
+    $$V_{cell, internal}(t) = E_{eq} + \eta_a(t) + \eta_c(t) + \eta_{conc}(t) + I(t) R_{sol}$$
 
     Where the individual components represent:
     
@@ -472,6 +501,8 @@ with tab2:
     *   **Ohmic Resistance ($R_{sol}$)**: The resistance of the bulk sulfuric acid solution separating the electrodes:
         $$R_{sol} = \frac{d_{gap}}{\kappa_{cond} A_{plate}}$$
 
+    *   **Parasitic & Contact Resistance ($R_{contact}, R_{plate}, R_{peripheral}$)**: Ohmic losses from hanger-bar contacts, the bulk electrode plates, and peripheral connections.
+
     ---
 
     ### 2. Thermal Energy Balance Model
@@ -481,8 +512,11 @@ with tab2:
 
     Key aspects of the thermal model include:
     
+    *   **Total Bath Joule Heat**: Ohmic heating occurs in the solution and the plates, plus a fraction of contact resistance heat conducting back through the hanger bars:
+        $$Q_{joule, total} = N_{sets} \cdot I^2 \cdot (R_{sol} + R_{plate} + f_{contact} \cdot R_{contact})$$
+
     *   **Endothermic Reaction Enthalpy Subtraction**: The chemical reaction absorbs energy. The net rate of heat generation is calculated by subtracting the reaction enthalpy, represented as a thermoneutral voltage ($E_{tn} = 1.15\text{ V}$):
-        $$Q_{gen, total}(t) = N_{sets} \cdot I(t) \cdot (V_{cell}(t) - E_{tn})$$
+        $$Q_{gen, total}(t) = Q_{joule, total}(t) + N_{sets} \cdot I(t) \cdot (\eta_a(t) + \eta_c(t) + \eta_{conc}(t) + E_{eq} - E_{tn})$$
         
     *   **Analytical Solution for Temperature Rise**: Integrating the thermal ODE yields the solution temperature rise over the operation duration $t$:
         $$\Delta T(t) = \frac{Q_{gen, avg}}{U A_{loss}} \left( 1 - \exp\left( -\frac{U A_{loss}}{m_{sol} C_p} t \right) \right)$$

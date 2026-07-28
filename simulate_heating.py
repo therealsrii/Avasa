@@ -20,6 +20,12 @@ kappa = 70.0     # Electrical conductivity (S/m)
 # Solution Resistance
 R_sol = d / (kappa * A) # Ohmic resistance (Ohm) -> 0.000714 Ohm
 
+# Parasitic and Contact Resistances (Ohms)
+R_contact = 0.0001     # Contact resistance at busbar junctions (0.1 mOhm)
+R_plate = 0.00005      # Electrode plate internal resistance (0.05 mOhm)
+R_peripheral = 0.00002 # Peripheral busbar & cable resistance (0.02 mOhm)
+f_contact = 0.5        # Fraction of contact resistance heat conducted to electrolyte
+
 # Electrochemical parameters
 E_eq = 0.89      # Equilibrium cell potential (V)
 E_tn = 1.15      # Thermoneutral voltage (V)
@@ -143,6 +149,8 @@ def get_average_heat_generation(f, D, I_val, mode='avg'):
         I_p = I_val
         I_avg = I_p * D
         
+    R_extra_heating = R_plate + f_contact * R_contact
+        
     # Check for DC limit
     if f == 0.0:
         # DC case: constant current = I_avg
@@ -153,8 +161,13 @@ def get_average_heat_generation(f, D, I_val, mode='avg'):
         Cs = np.maximum(1e-4 * C_b, C_b - K * tau_diff * I_avg)
         eta_conc = -(R_gas * T_ref / (2 * F)) * np.log(Cs / C_b)
         
-        V_cell = E_eq + eta_a + eta_c + eta_conc + I_avg * R_sol
-        Q_gen_avg = I_avg * (V_cell - E_tn)
+        Q_joule_sol = I_avg**2 * R_sol
+        Q_joule_extra = I_avg**2 * R_extra_heating
+        Q_joule = Q_joule_sol + Q_joule_extra
+        Q_over = I_avg * (eta_a + eta_c + eta_conc)
+        Q_chem = I_avg * (E_eq - E_tn)
+        
+        Q_gen_avg = Q_joule + Q_over + Q_chem
         return Q_gen_avg
         
     # Solve activation overpotentials
@@ -163,14 +176,14 @@ def get_average_heat_generation(f, D, I_val, mode='avg'):
     # Solve concentration overpotentials
     eta_conc_on = solve_concentration_overpotential_on(f, D, I_p)
     
-    # Cell voltage during the "on" pulse
-    V_cell_on = E_eq + eta_a_on + eta_c_on + eta_conc_on + I_p * R_sol
-    
     # Power and Heat Generation
-    # Electrical energy input: P_avg = D * I_p * V_cell_on = I_avg * V_cell_on
-    # Reaction chemical heat: Q_chem = I_avg * E_tn
-    # Net heat generation rate: Q_gen = I_avg * (V_cell_on - E_tn)
-    Q_gen_avg = I_avg * (V_cell_on - E_tn)
+    Q_joule_sol = D * I_p**2 * R_sol
+    Q_joule_extra = D * I_p**2 * R_extra_heating
+    Q_joule = Q_joule_sol + Q_joule_extra
+    Q_over = I_avg * (eta_c_on + eta_a_on + eta_conc_on)
+    Q_chem = I_avg * (E_eq - E_tn)
+    
+    Q_gen_avg = Q_joule + Q_over + Q_chem
     return Q_gen_avg
 
 def calculate_temp_rise(Q_gen_avg):
