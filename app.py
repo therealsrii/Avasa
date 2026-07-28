@@ -504,7 +504,7 @@ with tab2:
     | $I_{0,c}$ | Cathode Exchange Current | $10.0$ | $\text{A}$ | Kinematic charge transfer rate at cathode |
     | $I_{0,a}$ | Anode Exchange Current | $5.0$ | $\text{A}$ | Kinematic charge transfer rate at anode |
     | $\beta_c, \beta_a$ | Charge Transfer Coeff | $19.1$ | $\text{V}^{-1}$ | Kinetic symmetry factors ($\alpha F / R T$) |
-    | $C_b$ | Bulk Cu Concentration | $600.0$ | $\text{mol/m}^3$ | Bulk concentration of $\text{Cu}^{2+}$ ions |
+    | $C_b$ | Bulk Cu Concentration | $15.74$ | $\text{mol/m}^3$ | Bulk concentration of $\text{Cu}^{2+}$ ions ($1\text{ g/L}$) |
     | $\tau_{diff}$ | Diffusion Time Constant | $15.0$ | $\text{s}$ | Concentration boundary layer relaxation time |
     | $\delta$ | Boundary Layer Thickness | $10^{-4}$ | $\text{m}$ | Nernst diffusion boundary layer thickness |
     | $F$ | Faraday Constant | $96485$ | $\text{C/mol}$ | Charge per mole of electrons |
