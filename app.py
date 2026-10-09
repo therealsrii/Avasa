@@ -127,7 +127,7 @@ vol_sol = vol_sol_L / 1000.0 # Convert to m^3
 st.sidebar.subheader("Electrical & Chemical")
 I_target = st.sidebar.slider("Current per Electrode Set (A)", min_value=10, max_value=1000, value=350, step=10, help="Target current applied to each anode-cathode set (default is 350 A, corresponding to 350 A/m² on a 1m² active plate area).")
 kappa_cond = st.sidebar.slider("Electrolyte Conductivity (S/m)", min_value=10, max_value=120, value=70, step=5, help="Electrical conductivity of 20% H2SO4 with copper. Default is ~70 S/m.")
-C_cu_g_L = st.sidebar.slider("Copper Concentration (g/L)", min_value=0.1, max_value=50.0, value=3.0, step=0.1, help="Bulk Cu²⁺ concentration in the electrolyte. Sets the mass-transfer limiting current.")
+C_cu_g_L = st.sidebar.slider("Copper Concentration (g/L)", min_value=0.1, max_value=50.0, value=1.0, step=0.1, help="Bulk Cu²⁺ concentration in the electrolyte. Sets the mass-transfer limiting current.")
 temp_C = st.sidebar.slider("Electrolyte Temperature (°C)", min_value=20.0, max_value=60.0, value=30.0, step=1.0, help="Electrolyte (inlet) temperature. Sets viscosity, density and Cu diffusivity.")
 flow_rate_L_min = st.sidebar.slider("Electrolyte Flow Rate (L/min)", min_value=10, max_value=500, value=350, step=10, help="Electrolyte flow through the cathode jet holes. Drives mass transfer and, in continuous-flow mode, carries heat out of the cell.")
 
