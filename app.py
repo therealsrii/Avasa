@@ -2,7 +2,12 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 from scipy.integrate import solve_ivp
+import importlib
 import pulsed_ew_model as ewm
+
+# Streamlit reruns this script on every change but keeps imported modules cached, so a
+# redeploy that updates the model would otherwise keep running the old version.
+importlib.reload(ewm)
 
 # Set page config for a premium wide layout
 st.set_page_config(
