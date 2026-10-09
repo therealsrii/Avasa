@@ -354,7 +354,9 @@ def calculate_pulsed_ew_metrics(J_avg, f_pulse, D_pulse, flow_rate_L_min, temp_C
         'eta_conc_jet': eta_conc_jet,
         'eta_conc_dead': eta_conc_dead,
         'I_applied': I_app_total,
-        'I_actual': I_actual_total
+        'I_actual': I_actual_total,
+        'J_lim_jet': J_lim_jet,
+        'J_lim_dead': J_lim_dead
     }
 
 # ==============================================================================
@@ -568,7 +570,13 @@ def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=No
         'I0_c': 10.0,  # Cathode exchange current (A) for 1 m^2 plate area
         'I0_a': 5.0,   # Anode exchange current (A) for 1 m^2 plate area
         'beta_c': 19.1,
-        'beta_a': 19.1
+        'beta_a': 19.1,
+        # Hydrogen evolution side reaction on copper (assumed literature-typical values; calibrate
+        # against measured cell voltage)
+        'E_eq_H2': 1.23,  # Equilibrium voltage of water splitting (V)
+        'E_tn_H2': 1.48,  # Thermoneutral voltage of water splitting (V)
+        'J0_H2': 0.01,    # HER exchange current density on Cu (A/m^2)
+        'b_H2': 0.12      # HER Tafel slope (V/decade)
     }
     electrical_params = {**default_params, **(electrical_params or {})}
         
@@ -611,15 +619,33 @@ def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=No
     Q_joule_extra = n_faces * (D_eff * I_cell_peak**2 * R_extra_heating)
     Q_joule = Q_joule_sol + Q_joule_extra
     
-    # All applied current crosses the electrode interfaces, whether it deposits copper or drives
-    # side reactions, so overpotential and reaction-enthalpy heat use the applied current.
+    # Split the applied current into copper deposition and hydrogen evolution (current above the
+    # mass-transfer limit evolves hydrogen at the cathode)
     I_app_total = n_faces * I_cell_avg
-    Q_over = I_app_total * (eta_c_on + eta_a_on + eta_conc_on)
-    Q_chem = I_app_total * (electrical_params['E_eq'] - electrical_params['E_tn'])
+    I_cu = min(metrics['I_actual'], I_app_total)
+    I_h2 = I_app_total - I_cu
+    
+    # Interface voltage during the 'on' pulse. The cathode is one equipotential metal, so the cell
+    # runs at whichever reaction path needs the higher voltage.
+    V_if_cu = electrical_params['E_eq'] + eta_a_on + eta_c_on + eta_conc_on
+    J_h2_peak = I_h2 / (n_faces * plate_area) / D_eff
+    if J_h2_peak > electrical_params['J0_H2']:
+        eta_h2_on = electrical_params['b_H2'] * math.log10(J_h2_peak / electrical_params['J0_H2'])
+        V_if_h2 = electrical_params['E_eq_H2'] + eta_a_on + eta_h2_on
+    else:
+        eta_h2_on = 0.0
+        V_if_h2 = 0.0
+    V_if = max(V_if_cu, V_if_h2)
+    
+    # Electrochemical heat = interface power minus the enthalpy stored in each reaction product.
+    # Split into irreversible (overpotential) and reversible (reaction entropy) parts.
+    Q_over = I_app_total * V_if - I_cu * electrical_params['E_eq'] - I_h2 * electrical_params['E_eq_H2']
+    Q_chem = (I_cu * (electrical_params['E_eq'] - electrical_params['E_tn'])
+              + I_h2 * (electrical_params['E_eq_H2'] - electrical_params['E_tn_H2']))
     Q_total = Q_joule + Q_over + Q_chem
     
     # Peak cell voltage during the 'on' pulse
-    V_cell_peak_internal = electrical_params['E_eq'] + eta_a_on + eta_c_on + eta_conc_on + I_cell_peak * R_sol
+    V_cell_peak_internal = V_if + I_cell_peak * R_sol
     V_cell_peak_total = V_cell_peak_internal + I_cell_peak * R_extra_voltage
         
     return {
@@ -631,6 +657,11 @@ def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=No
         'V_cell_peak_internal_V': V_cell_peak_internal,
         'V_cell_peak_total_V': V_cell_peak_total,
         'I_applied_A': I_app_total,
+        'I_copper_A': I_cu,
+        'I_hydrogen_A': I_h2,
+        'eta_H2_V': eta_h2_on,
+        'J_lim_jet': metrics['J_lim_jet'],
+        'J_lim_dead': metrics['J_lim_dead'],
         'efficiency_percent': metrics['efficiency_percent'],
         'copper_g_min': metrics['copper_g_min']
     }

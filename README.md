@@ -15,7 +15,7 @@ This repository contains physical, electrochemical, hydraulic, and thermal model
   * Current efficiency $\ge 80\%$.
   * Electrolyte steady-state operating temperature under continuous flow $\le 50\text{ }^\circ\text{C}$ (safe materials limit).
 * **`optimize_ew.py`**: Performance-only optimization script without safe thermal constraints.
-* **`app.py`**: An interactive Streamlit web dashboard to simulate, visualize, and forecast cell voltages, heat generation, current efficiency, and temperature rises in the electrowinning bath. All physics comes from `pulsed_ew_model.py`, so the dashboard and the optimizers agree. It offers two thermal models: a closed bath heating up over time, and continuous flow at steady state. It also checks the operating point against the rectifier's current and voltage rating (default 4500 A / 6 V, with the electrode sets wired in parallel).
+* **`app.py`**: An interactive Streamlit web dashboard to simulate, visualize, and forecast cell voltages, heat generation, current efficiency, and temperature rises in the electrowinning bath. All physics comes from `pulsed_ew_model.py`, so the dashboard and the optimizers agree. It offers two thermal models: a closed bath heating up over time, and continuous flow at steady state. It also checks the operating point against the rectifier's current and voltage rating (default 4500 A / 6 V, with the electrode sets wired in parallel). For copper powder production it shows the deposit regime (applied vs. limiting current density in the jet and dead zones), hydrogen and oxygen evolution rates with an indicative ventilation requirement, and yearly copper yield.
 * **`simulate_heating.py`**: A transient solver using SciPy to simulate electrowinning cell temperatures over time.
 
 ---

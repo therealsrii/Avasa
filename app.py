@@ -122,9 +122,9 @@ vol_sol = vol_sol_L / 1000.0 # Convert to m^3
 st.sidebar.subheader("Electrical & Chemical")
 I_target = st.sidebar.slider("Current per Electrode Set (A)", min_value=10, max_value=1000, value=350, step=10, help="Target current applied to each anode-cathode set (default is 350 A, corresponding to 350 A/m² on a 1m² active plate area).")
 kappa_cond = st.sidebar.slider("Electrolyte Conductivity (S/m)", min_value=10, max_value=120, value=70, step=5, help="Electrical conductivity of 20% H2SO4 with copper. Default is ~70 S/m.")
-C_cu_g_L = st.sidebar.slider("Copper Concentration (g/L)", min_value=0.5, max_value=50.0, value=1.0, step=0.5, help="Bulk Cu²⁺ concentration in the electrolyte. Sets the mass-transfer limiting current.")
+C_cu_g_L = st.sidebar.slider("Copper Concentration (g/L)", min_value=0.1, max_value=50.0, value=3.0, step=0.1, help="Bulk Cu²⁺ concentration in the electrolyte. Sets the mass-transfer limiting current.")
 temp_C = st.sidebar.slider("Electrolyte Temperature (°C)", min_value=20.0, max_value=60.0, value=30.0, step=1.0, help="Electrolyte (inlet) temperature. Sets viscosity, density and Cu diffusivity.")
-flow_rate_L_min = st.sidebar.slider("Electrolyte Flow Rate (L/min)", min_value=10, max_value=500, value=150, step=10, help="Electrolyte flow through the cathode jet holes. Drives mass transfer and, in continuous-flow mode, carries heat out of the cell.")
+flow_rate_L_min = st.sidebar.slider("Electrolyte Flow Rate (L/min)", min_value=10, max_value=500, value=350, step=10, help="Electrolyte flow through the cathode jet holes. Drives mass transfer and, in continuous-flow mode, carries heat out of the cell.")
 
 st.sidebar.subheader("Parasitic Resistance & Contacts")
 R_contact_mohm = st.sidebar.slider("Contact Resistance (mΩ)", min_value=0.0, max_value=2.0, value=0.1, step=0.05, help="Electrical contact resistance at the busbar-to-hanger-bar junctions (anode + cathode).")
@@ -272,7 +272,7 @@ st.markdown(f"""
         <div>
             <div style="font-size: 2.25rem; font-weight: 800; color: #b91c1c; letter-spacing: -0.03em;">+{dT_final:.2f} °C</div>
             <div style="font-size: 0.85rem; color: #4b5563; margin-top: 2px;">{dT_caption} (at {f_pulse:.1f} Hz, {D_pulse*100:.0f}% D)</div>
-            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 6px;">Current Efficiency <b>{efficiency:.1f}%</b> · Cu Deposition <b>{copper_kg_hr:.3f} kg/h</b></div>
+            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 6px;">Current to Copper <b>{efficiency:.1f}%</b> (rest evolves H₂) · Cu Deposition <b>{copper_kg_hr:.3f} kg/h</b></div>
         </div>
         <div style="text-align: right; min-width: 200px;">
             <div style="font-size: 1.5rem; font-weight: 700; color: #09090b;">{P_gen/1000.0:.2f} kW</div>
@@ -315,6 +315,68 @@ if rect_problems:
     st.error(msg)
 else:
     st.success(f"**Rectifier OK:** peak demand {I_rect_peak:,.0f} A ({100 * I_rect_peak / I_rect_max:.0f}% of {I_rect_max:,.0f} A) at {V_on_total:.2f} V ({100 * V_on_total / V_rect_max:.0f}% of {V_rect_max:.1f} V).")
+
+# Deposit regime: average current density relative to the mass-transfer limit in each zone.
+# Above the limit copper grows as loose dendritic powder; below it, as a compact adherent layer.
+J_avg_op = (float(I_target) if mode == "Constant Average Current" else float(I_target) * D_pulse) / A_plate
+ratio_jet = J_avg_op / heat['J_lim_jet']
+ratio_dead = J_avg_op / heat['J_lim_dead']
+
+def deposit_regime(ratio):
+    if ratio < 1.0:
+        return "Compact (sticks to plate)", "#b91c1c"
+    if ratio < 1.5:
+        return "Borderline", "#b45309"
+    return "Powder", "#15803d"
+
+regime_jet, color_jet = deposit_regime(ratio_jet)
+regime_dead, color_dead = deposit_regime(ratio_dead)
+
+# Gas evolution at 25 °C, 1 atm (24.45 L/mol). Hydrogen from current above the copper limit at the
+# cathode; oxygen from all current at the anode.
+V_molar_L = 24.45
+H2_L_min = heat['I_hydrogen_A'] / (2.0 * ewm.F) * V_molar_L * 60.0
+O2_L_min = heat['I_applied_A'] / (4.0 * ewm.F) * V_molar_L * 60.0
+# Extraction air to dilute H2 to 1% by volume (25% of its 4% lower flammability limit)
+vent_m3_h = H2_L_min * 60.0 / 1000.0 / 0.01
+
+reg_col, gas_col = st.columns(2)
+with reg_col:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-label">Deposit Regime (J / J<sub>lim</sub>)</div>
+        <div style="display: flex; justify-content: space-between; margin-top: 6px;">
+            <div>
+                <div style="font-size: 0.8rem; color: #71717a;">Jet zones</div>
+                <div style="font-size: 1.5rem; font-weight: 700;">{ratio_jet:.1f}×</div>
+                <div style="font-size: 0.85rem;"><strong style="color: {color_jet};">{regime_jet}</strong></div>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 0.8rem; color: #71717a;">Dead zones</div>
+                <div style="font-size: 1.5rem; font-weight: 700;">{ratio_dead:.1f}×</div>
+                <div style="font-size: 0.85rem;"><strong style="color: {color_dead};">{regime_dead}</strong></div>
+            </div>
+        </div>
+        <div class="metric-subtext">J = {J_avg_op:.0f} A/m² vs limit {heat['J_lim_jet']:.0f} (jet) / {heat['J_lim_dead']:.0f} (dead) A/m². Powder above 1.5× is a rule of thumb; confirm by test.</div>
+    </div>
+    """, unsafe_allow_html=True)
+with gas_col:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-label">Gas Evolution</div>
+        <div style="display: flex; justify-content: space-between; margin-top: 6px;">
+            <div>
+                <div style="font-size: 0.8rem; color: #71717a;">H₂ (cathode)</div>
+                <div style="font-size: 1.5rem; font-weight: 700;">{H2_L_min:.1f} L/min</div>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 0.8rem; color: #71717a;">O₂ (anode)</div>
+                <div style="font-size: 1.5rem; font-weight: 700;">{O2_L_min:.1f} L/min</div>
+            </div>
+        </div>
+        <div class="metric-subtext">Keeping H₂ below 1% in the headspace needs roughly <b>{vent_m3_h:,.0f} m³/h</b> of extraction air (indicative only; design ventilation to the applicable safety standards).</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -484,16 +546,21 @@ with tab1:
         - **Linear Heat Decrease**: Since the peak current is fixed at **{I_target} A**, reducing the duty cycle decreases the average current linearly ($I_{{avg}} = I_{{peak}} \\cdot D$). Both Joule heating ($D \\cdot I_{{peak}}^2 R$) and overpotential power drop linearly with $D$, causing the temperature rise to drop to nearly 0°C at very low duty cycles.
         - **Production Trade-off**: While a lower duty cycle reduces solution heating, it also reduces the copper deposition rate proportionally due to the lower average current.
         """)
-    J_lim_jet = 2.0 * ewm.F * mt['k_jet'] * (C_cu_g_L / ewm.M_cu) * 1000.0
-    J_peak_op = (I_target / A_plate) / D_pulse if mode == "Constant Average Current" else I_target / A_plate
-    if efficiency < 99.5:
-        st.markdown(f"""
-        - **Mass-Transfer Limit**: At {C_cu_g_L:.1f} g/L Cu and {flow_rate_L_min} L/min, the limiting current density is **{J_lim_jet:.1f} A/m²** in the jet zones and **{0.15 * J_lim_jet:.1f} A/m²** in the dead zones, below the **{J_peak_op:.0f} A/m²** peak current density. The excess current drives side reactions instead of copper deposition, which is why current efficiency is **{efficiency:.1f}%** at this operating point.
-        - **Why Frequency Does Not Help**: Averaged over time, copper can reach the cathode no faster than the limiting current allows, no matter how the current is pulsed. Pulsing only changes how the current is distributed in time. To raise efficiency, increase copper concentration, flow rate or temperature (raises the limit), or add plate area (lowers the current density).
-        """)
+    if ratio_jet >= 1.0:
+        mt_text = (f"The applied **{J_avg_op:.0f} A/m²** is above the limit in both zones, so copper grows as loose powder "
+                   f"and the remaining current evolves hydrogen; **{efficiency:.1f}%** of the current deposits copper. "
+                   "Low current efficiency is expected when making powder.")
+    elif ratio_dead >= 1.0:
+        mt_text = (f"The applied **{J_avg_op:.0f} A/m²** is above the limit only in the dead zones. Expect a **mixed deposit**: "
+                   "powder in the dead zones, but compact copper that sticks to the plate around the jet holes "
+                   "(and may narrow them). Lower the copper concentration or flow, or raise the current density, to get powder everywhere.")
     else:
-        st.markdown(f"""
-        - **Mass-Transfer Limit**: At {C_cu_g_L:.1f} g/L Cu and {flow_rate_L_min} L/min, the limiting current density is **{J_lim_jet:.1f} A/m²** in the jet zones and **{0.15 * J_lim_jet:.1f} A/m²** in the dead zones (peak current density **{J_peak_op:.0f} A/m²**). The cathode surface does not deplete of copper during the pulses, so essentially all current deposits copper (efficiency **{efficiency:.1f}%**).
+        mt_text = (f"The applied **{J_avg_op:.0f} A/m²** is below the limit in both zones, so copper deposits as a "
+                   f"**compact layer that sticks to the plate**, not powder (efficiency **{efficiency:.1f}%**).")
+    st.markdown(f"""
+        - **Mass-Transfer Limit and Deposit Type**: At {C_cu_g_L:.1f} g/L Cu and {flow_rate_L_min} L/min, copper can reach the cathode at most at **{heat['J_lim_jet']:.0f} A/m²** in the jet zones and **{heat['J_lim_dead']:.0f} A/m²** in the dead zones. {mt_text}
+        - **What Sets the Yield**: Above the limit, extra current makes hydrogen, not copper. Copper yield is set by cathode area times the limiting current, so it rises with flow rate, temperature, copper concentration and plate area. Spreading the same rectifier current over more plates (lower A/m², still above the limit) gives more powder.
+        - **Why Frequency Does Not Help Yield**: Averaged over time, copper can reach the cathode no faster than the limiting current allows, no matter how the current is pulsed. Pulse frequency may still affect powder particle size and shape, which this model does not predict.
         """)
 
 with tab2:
@@ -559,13 +626,27 @@ with tab2:
 
     ---
 
-    ### 3. Model Parameters and Constants Reference Table
+    ### 3. Hydrogen Evolution and Deposit Morphology
+    Current above the copper mass-transfer limit evolves hydrogen at the cathode:
+    $$I_{H_2} = I_{applied} - I_{Cu}$$
+    The cathode is a single equipotential metal, so the cell runs at whichever reaction path needs the higher voltage. The hydrogen path uses Tafel kinetics:
+    $$V_{interface} = \max\left(E_{eq} + \eta_a + \eta_c + \eta_{conc},\; E_{eq,H_2} + \eta_a + b_{H_2}\log_{10}\frac{J_{H_2}}{J_{0,H_2}}\right)$$
+    Heat generation is the interface power minus the enthalpy stored in each product:
+    $$Q_{electrochem} = I_{applied} V_{interface} - I_{Cu} E_{tn} - I_{H_2} E_{tn,H_2}$$
+    The ratio of applied to limiting current density, $J/J_{lim}$, indicates deposit morphology: below 1 copper forms a compact adherent layer; above the limit it grows as dendritic powder. The 1.5× powder threshold shown on the dashboard is a rule of thumb that should be confirmed experimentally.
+
+    ---
+
+    ### 4. Model Parameters and Constants Reference Table
     The physical and chemical parameters used to evaluate the electrowinning cell model are listed below:
 
     | Symbol | Parameter Description | Nominal Value | Unit | Physical Significance |
     | :--- | :--- | :--- | :--- | :--- |
     | $E_{eq}$ | Equilibrium Potential | $0.89$ | $\text{V}$ | Thermodynamic potential for Cu deposition / $\text{O}_2$ evolution |
     | $E_{tn}$ | Thermoneutral Potential | $1.15$ | $\text{V}$ | Cell voltage at which net reaction heat generation is zero |
+    | $E_{eq,H_2}, E_{tn,H_2}$ | Water Splitting Potentials | $1.23, 1.48$ | $\text{V}$ | Equilibrium and thermoneutral voltage of the hydrogen side reaction |
+    | $J_{0,H_2}$ | HER Exchange Current Density | $0.01$ | $\text{A/m}^2$ | Assumed typical value on copper; calibrate against measured cell voltage |
+    | $b_{H_2}$ | HER Tafel Slope | $0.12$ | $\text{V/decade}$ | Assumed typical value; calibrate against measured cell voltage |
     | $C_c, C_a$ | Double-Layer Capacitance | $0.2$ | $\text{F}$ | Cathode & Anode double-layer capacitance |
     | $I_{0,c}$ | Cathode Exchange Current | $10.0$ | $\text{A}$ | Kinematic charge transfer rate at cathode |
     | $I_{0,a}$ | Anode Exchange Current | $5.0$ | $\text{A}$ | Kinematic charge transfer rate at anode |
