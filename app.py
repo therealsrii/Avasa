@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 from scipy.integrate import solve_ivp
+import pulsed_ew_model as ewm
 
 # Set page config for a premium wide layout
 st.set_page_config(
@@ -89,9 +90,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Backward compatibility helper for NumPy 2.x trapezoid / trapz
-trapezoid = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
-
 # ==========================================
 # SIDEBAR PARAMETERS
 # ==========================================
@@ -106,7 +104,7 @@ mode = st.sidebar.radio(
 
 # Sliders for physical properties
 st.sidebar.subheader("Cell Geometry")
-N_sets = st.sidebar.slider("Number of Electrode Sets", min_value=1, max_value=100, value=45, step=1, help="Number of identical anode-cathode pairs operating in the bath.")
+N_sets = st.sidebar.slider("Number of Electrode Sets", min_value=1, max_value=100, value=8, step=1, help="Number of identical anode-cathode pairs operating in the bath, connected in parallel to the rectifier.")
 A_plate = st.sidebar.slider("Plate Area (m²)", min_value=0.1, max_value=4.0, value=1.0, step=0.1, help="Area of the anode and cathode plates.")
 d_gap_cm = st.sidebar.slider("Plate Gap Distance (cm)", min_value=1.0, max_value=20.0, value=5.0, step=0.5, help="Distance separating the anode and cathode.")
 d_gap = d_gap_cm / 100.0 # Convert to meters
@@ -122,8 +120,11 @@ vol_sol_L = st.sidebar.slider("Solution Volume (L)", min_value=min_vol, max_valu
 vol_sol = vol_sol_L / 1000.0 # Convert to m^3
 
 st.sidebar.subheader("Electrical & Chemical")
-I_target = st.sidebar.slider("Current (A)", min_value=10, max_value=500, value=150, step=10, help="Target current applied to the electrowinning cell (default is 150 A, corresponding to 150 A/m² on a 1m² active plate area).")
+I_target = st.sidebar.slider("Current per Electrode Set (A)", min_value=10, max_value=1000, value=350, step=10, help="Target current applied to each anode-cathode set (default is 350 A, corresponding to 350 A/m² on a 1m² active plate area).")
 kappa_cond = st.sidebar.slider("Electrolyte Conductivity (S/m)", min_value=10, max_value=120, value=70, step=5, help="Electrical conductivity of 20% H2SO4 with copper. Default is ~70 S/m.")
+C_cu_g_L = st.sidebar.slider("Copper Concentration (g/L)", min_value=0.5, max_value=50.0, value=1.0, step=0.5, help="Bulk Cu²⁺ concentration in the electrolyte. Sets the mass-transfer limiting current.")
+temp_C = st.sidebar.slider("Electrolyte Temperature (°C)", min_value=20.0, max_value=60.0, value=30.0, step=1.0, help="Electrolyte (inlet) temperature. Sets viscosity, density and Cu diffusivity.")
+flow_rate_L_min = st.sidebar.slider("Electrolyte Flow Rate (L/min)", min_value=10, max_value=500, value=150, step=10, help="Electrolyte flow through the cathode jet holes. Drives mass transfer and, in continuous-flow mode, carries heat out of the cell.")
 
 st.sidebar.subheader("Parasitic Resistance & Contacts")
 R_contact_mohm = st.sidebar.slider("Contact Resistance (mΩ)", min_value=0.0, max_value=2.0, value=0.1, step=0.05, help="Electrical contact resistance at the busbar-to-hanger-bar junctions (anode + cathode).")
@@ -133,147 +134,96 @@ f_contact_heat_pct = st.sidebar.slider("Contact Heat Conducted to Bath (%)", min
 
 st.sidebar.subheader("Pulsing Parameters")
 f_pulse = st.sidebar.slider("Pulsing Frequency (Hz)", min_value=1.0, max_value=60.0, value=30.0, step=1.0, help="Operating pulsing frequency of the current.")
-D_pulse = st.sidebar.slider("Duty Cycle (D)", min_value=0.05, max_value=1.0, value=0.50, step=0.05, help="Operating duty cycle of the pulses.")
+D_pulse = st.sidebar.slider("Duty Cycle (D)", min_value=0.05, max_value=1.0, value=0.75, step=0.05, help="Operating duty cycle of the pulses.")
+
+st.sidebar.subheader("Rectifier")
+I_rect_max = st.sidebar.slider("Rectifier Max Current (A)", min_value=500, max_value=10000, value=4500, step=100, help="Rated output current of the rectifier. All electrode sets are fed in parallel, so it must supply the peak current of every set at once.")
+V_rect_max = st.sidebar.slider("Rectifier Max Voltage (V)", min_value=1.0, max_value=20.0, value=6.0, step=0.5, help="Rated output voltage of the rectifier. With the sets in parallel, it must supply the peak cell voltage.")
 
 st.sidebar.subheader("Heat Transfer")
+thermal_mode = st.sidebar.radio(
+    "Thermal Model",
+    ["Closed Bath (Transient)", "Continuous Flow (Steady State)"],
+    help="Closed Bath: no fresh feed, the bath heats up over the operation duration.\nContinuous Flow: fresh electrolyte enters at the electrolyte temperature and carries heat out; reports the steady-state rise."
+)
 U_coeff = st.sidebar.slider("Heat Loss Coefficient U (W/m²K)", min_value=0.0, max_value=50.0, value=10.0, step=1.0, help="Heat transfer coefficient to the surrounding air. 0 = Adiabatic cell.")
-t_run_min = st.sidebar.slider("Operation Duration (min)", min_value=5, max_value=120, value=20, step=5, help="Duration of electrowinning operation.")
-t_run = t_run_min * 60.0 # Convert to seconds
+if thermal_mode == "Closed Bath (Transient)":
+    t_run_min = st.sidebar.slider("Operation Duration (min)", min_value=5, max_value=120, value=20, step=5, help="Duration of electrowinning operation.")
+else:
+    t_run_min = None
 
 # Hidden/Static parameters
 rho_sol = 1140.0 # Density (kg/m^3)
 m_sol = rho_sol * vol_sol  # Mass of solution (kg)
 C_p = 3500.0     # Heat capacity of 20% H2SO4 (J/kg/K)
-E_eq = 0.89      # Equilibrium cell potential (V)
-E_tn = 1.15      # Thermoneutral voltage (V)
+T_amb = 25.0     # Ambient temperature (°C)
 
-# Double-layer properties
-C_c = 0.2        # Cathode double-layer capacitance (F)
-C_a = 0.2        # Anode double-layer capacitance (F)
-I0_c = 10.0      # Cathode exchange current (A)
-I0_a = 5.0       # Anode exchange current (A)
-beta_c = 19.1    # Cathode charge transfer coeff (V^-1)
-beta_a = 19.1    # Anode charge transfer coeff (V^-1)
+# Cell geometry passed to the core model. Each electrode set is one anode-cathode
+# gap, i.e. one active cathode face.
+geom = {
+    'plate_width': np.sqrt(A_plate),
+    'plate_length': np.sqrt(A_plate),
+    'd_hole': 0.01,
+    'pitch': 0.02,
+    'n_faces': N_sets
+}
 
-# Mass transport
-C_b = 15.74      # Bulk copper concentration (mol/m^3) corresponding to 1 g/L
-tau_diff = 15.0  # Diffusion time constant (s)
-delta = 1e-4     # Diffusion boundary layer thickness (m)
-F = 96485.0      # Faraday constant (C/mol)
-R_gas = 8.314    # Gas constant (J/mol/K)
-T_ref = 303.15   # Reference Temperature (K)
-
-# Calculated Resistance
-R_sol = d_gap / (kappa_cond * A_plate)
-
-# Additional Resistances (conversions to Ohms)
-R_contact = R_contact_mohm / 1000.0
-R_plate = R_plate_mohm / 1000.0
-R_peripheral = R_peripheral_mohm / 1000.0
-f_contact = f_contact_heat_pct / 100.0
+# Electrical and kinetic parameters passed to the core model
+electrical_params = {
+    'kappa_cond': float(kappa_cond),
+    'd_gap': d_gap,
+    'R_contact': R_contact_mohm / 1000.0,
+    'R_plate': R_plate_mohm / 1000.0,
+    'R_peripheral': R_peripheral_mohm / 1000.0,
+    'f_contact': f_contact_heat_pct / 100.0,
+    'E_eq': 0.89,     # Equilibrium cell potential (V)
+    'E_tn': 1.15,     # Thermoneutral voltage (V)
+    'I0_c': 10.0,     # Cathode exchange current (A)
+    'I0_a': 5.0,      # Anode exchange current (A)
+    'beta_c': 19.1,   # Cathode charge transfer coeff (V^-1)
+    'beta_a': 19.1    # Anode charge transfer coeff (V^-1)
+}
 
 # ==========================================
-# SOLVER IMPLEMENTATION
+# SOLVER IMPLEMENTATION (physics from pulsed_ew_model.py)
 # ==========================================
-
-def solve_overpotentials_fast(I_p):
-    """
-    Computes steady-state overpotentials. Since double-layer time constant is
-    on the order of microseconds, it is in steady state during the entire 'on' period.
-    """
-    if I_p <= 0:
-        return 0.0, 0.0
-    eta_c_on = (1.0 / beta_c) * np.arcsinh(I_p / (2 * I0_c))
-    eta_a_on = (1.0 / beta_a) * np.arcsinh(I_p / (2 * I0_a))
-    return eta_c_on, eta_a_on
-
-def solve_concentration_overpotential_on_fast(f, D, I_p):
-    """
-    Analytically solves the linear diffusion boundary layer ODE for concentration overpotential.
-    """
-    T = 1.0 / f
-    T_on = D * T
-    
-    K = 1.0 / (2 * F * A_plate * delta)
-    E_1 = np.exp(-T_on / tau_diff)
-    E_2 = np.exp(-(T - T_on) / tau_diff)
-    
-    C_1 = C_b - K * tau_diff * I_p
-    
-    # Boundary concentration Cs(0) in periodic steady state
-    Cs_0 = C_b - K * tau_diff * I_p * (E_2 * (1.0 - E_1)) / (1.0 - E_1 * E_2 + 1e-15)
-    
-    # Sample points to integrate over the 'on' period
-    t_vals = np.linspace(0, T_on, 50)
-    Cs_vals = C_1 + (Cs_0 - C_1) * np.exp(-t_vals / tau_diff)
-    Cs_vals = np.maximum(1e-4 * C_b, Cs_vals) # Cap to avoid non-positive concentration
-    
-    # Concentration overpotential (V)
-    eta_conc_vals = -(R_gas * T_ref / (2 * F)) * np.log(Cs_vals / C_b)
-    
-    return trapezoid(eta_conc_vals, t_vals) / T_on
 
 def calculate_cell_metrics(f, D, mode_select, N_sets=1):
     """
-    Calculates cell voltages, powers, and temperature rise for the whole bath (N_sets).
+    Calculates cell voltages, powers, efficiency and temperature rise for the whole bath (N_sets)
+    using the core pulsed electrowinning model.
     """
     if mode_select == "Constant Average Current":
         I_avg = float(I_target)
-        I_p = I_avg / D
     else:
-        I_p = float(I_target)
-        I_avg = I_p * D
-        
-    R_extra_voltage = R_plate + R_contact + R_peripheral
-    R_extra_heating = R_plate + f_contact * R_contact
-        
-    if f == 0.0:
-        # DC case
-        eta_c = (1.0 / beta_c) * np.arcsinh(I_avg / (2 * I0_c))
-        eta_a = (1.0 / beta_a) * np.arcsinh(I_avg / (2 * I0_a))
-        K = 1.0 / (2 * F * A_plate * delta)
-        Cs = np.maximum(1e-4 * C_b, C_b - K * tau_diff * I_avg)
-        eta_conc = -(R_gas * T_ref / (2 * F)) * np.log(Cs / C_b)
-        
-        V_cell_on_int = E_eq + eta_a + eta_c + eta_conc + I_avg * R_sol
-        V_cell_on_total = V_cell_on_int + I_avg * R_extra_voltage
-        
-        Q_joule_sol = N_sets * (I_avg**2 * R_sol)
-        Q_joule_extra = N_sets * (I_avg**2 * R_extra_heating)
-        Q_joule = Q_joule_sol + Q_joule_extra
-        
-        Q_over = N_sets * (I_avg * (eta_a + eta_c + eta_conc))
-        Q_chem = N_sets * (I_avg * (E_eq - E_tn))
-        Q_gen = Q_joule + Q_over + Q_chem
-    else:
-        # Pulsed case
-        eta_c_on, eta_a_on = solve_overpotentials_fast(I_p)
-        eta_conc_on = solve_concentration_overpotential_on_fast(f, D, I_p)
-        
-        V_cell_on_int = E_eq + eta_a_on + eta_c_on + eta_conc_on + I_p * R_sol
-        V_cell_on_total = V_cell_on_int + I_p * R_extra_voltage
-        
-        # Joule heating: average current squared * R during on-time = D * I_p^2 * R = I_avg * I_p * R
-        Q_joule_sol = N_sets * (D * I_p**2 * R_sol)
-        Q_joule_extra = N_sets * (D * I_p**2 * R_extra_heating)
-        Q_joule = Q_joule_sol + Q_joule_extra
-        
-        Q_over = N_sets * (I_avg * (eta_a_on + eta_c_on + eta_conc_on))
-        Q_chem = N_sets * (I_avg * (E_eq - E_tn))
-        Q_gen = Q_joule + Q_over + Q_chem
-        
+        I_avg = float(I_target) * D
+    J_avg = I_avg / A_plate
+    
+    heat = ewm.calculate_heat_generation(
+        J_avg, f, D, temp_C, C_cu_g_L,
+        geom=geom, electrical_params=electrical_params, flow_rate_L_min=flow_rate_L_min
+    )
+    Q_gen = heat['Q_total_W']
+    
     # Temperature rise calculations with convective heat losses
     # Total heat loss area scales with number of cells in the tank
     A_loss = 2.0 * A_plate + (4.0 * N_sets * np.sqrt(A_plate) * d_gap)
     UA = U_coeff * A_loss
-    mC = m_sol * C_p
     
-    if UA == 0:
-        dT = (Q_gen * t_run) / mC
+    if thermal_mode == "Closed Bath (Transient)":
+        mC = m_sol * C_p
+        t_run = t_run_min * 60.0
+        if UA == 0:
+            dT = (Q_gen * t_run) / mC
+        else:
+            dT = (Q_gen / UA) * (1.0 - np.exp(-(UA / mC) * t_run))
     else:
-        dT = (Q_gen / UA) * (1.0 - np.exp(-(UA / mC) * t_run))
+        # Steady state with fresh electrolyte entering at temp_C; rise is relative to the inlet
+        m_dot_Cp = rho_sol * (flow_rate_L_min / 60000.0) * C_p
+        T_ss = (Q_gen + UA * T_amb + m_dot_Cp * temp_C) / (UA + m_dot_Cp)
+        dT = T_ss - temp_C
         
-    return V_cell_on_int, V_cell_on_total, Q_joule_sol, Q_joule_extra, Q_over, Q_chem, Q_gen, dT
+    return heat, dT
 
 # ==========================================
 # MAIN PAGE LAYOUT
@@ -286,7 +236,23 @@ You can adjust the parameters in the sidebar to see how cell geometry, electrica
 """)
 
 # Calculate current active operating point metrics using the sidebar pulsing sliders
-V_on_int, V_on_total, P_joule_sol, P_joule_extra, P_over, P_chem, P_gen, dT_final = calculate_cell_metrics(f_pulse, D_pulse, mode, N_sets)
+heat, dT_final = calculate_cell_metrics(f_pulse, D_pulse, mode, N_sets)
+V_on_int = heat['V_cell_peak_internal_V']
+V_on_total = heat['V_cell_peak_total_V']
+P_joule_sol = heat['Q_joule_sol_W']
+P_joule_extra = heat['Q_joule_extra_W']
+P_over = heat['Q_overpotential_W']
+P_chem = heat['Q_chemical_W']
+P_gen = heat['Q_total_W']
+efficiency = heat['efficiency_percent']
+copper_kg_hr = heat['copper_g_min'] * 60.0 / 1000.0
+
+if thermal_mode == "Closed Bath (Transient)":
+    dT_caption = f"Temperature Rise after <b>{t_run_min} min</b> of operation"
+    dT_axis = f"Temperature Rise after {t_run_min} min"
+else:
+    dT_caption = f"Steady-State Rise above {temp_C:.0f} °C inlet at <b>{flow_rate_L_min} L/min</b>"
+    dT_axis = "Steady-State Temperature Rise"
 P_joule = P_joule_sol + P_joule_extra
 
 # Callout box for the whole bath forecast (N_sets)
@@ -296,7 +262,8 @@ st.markdown(f"""
     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
         <div>
             <div style="font-size: 2.25rem; font-weight: 800; color: #b91c1c; letter-spacing: -0.03em;">+{dT_final:.2f} °C</div>
-            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 2px;">Temperature Rise after <b>{t_run_min} min</b> of operation (at {f_pulse:.1f} Hz, {D_pulse*100:.0f}% D)</div>
+            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 2px;">{dT_caption} (at {f_pulse:.1f} Hz, {D_pulse*100:.0f}% D)</div>
+            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 6px;">Current Efficiency <b>{efficiency:.1f}%</b> · Cu Deposition <b>{copper_kg_hr:.3f} kg/h</b></div>
         </div>
         <div style="text-align: right; min-width: 200px;">
             <div style="font-size: 1.5rem; font-weight: 700; color: #09090b;">{P_gen/1000.0:.2f} kW</div>
@@ -305,6 +272,23 @@ st.markdown(f"""
     </div>
 </div>
 """, unsafe_allow_html=True)
+
+# Rectifier capacity check (electrode sets are in parallel: currents add, voltage is one cell)
+I_set_peak = float(I_target) / D_pulse if mode == "Constant Average Current" else float(I_target)
+I_rect_peak = N_sets * I_set_peak
+I_rect_avg = N_sets * (float(I_target) if mode == "Constant Average Current" else float(I_target) * D_pulse)
+rect_problems = []
+if I_rect_peak > I_rect_max:
+    rect_problems.append(f"peak current **{I_rect_peak:,.0f} A** exceeds the **{I_rect_max:,.0f} A** rating")
+if V_on_total > V_rect_max:
+    rect_problems.append(f"peak voltage **{V_on_total:.2f} V** exceeds the **{V_rect_max:.1f} V** rating")
+if rect_problems:
+    msg = "**Rectifier overloaded:** " + " and ".join(rect_problems) + "."
+    if mode == "Constant Average Current" and I_rect_avg <= I_rect_max:
+        msg += f" At this average current the duty cycle must be at least **{np.ceil(100 * I_rect_avg / I_rect_max) / 100:.2f}**."
+    st.error(msg)
+else:
+    st.success(f"**Rectifier OK:** peak demand {I_rect_peak:,.0f} A ({100 * I_rect_peak / I_rect_max:.0f}% of {I_rect_max:,.0f} A) at {V_on_total:.2f} V ({100 * V_on_total / V_rect_max:.0f}% of {V_rect_max:.1f} V).")
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -368,7 +352,7 @@ with tab1:
     Z_grid = np.zeros_like(F_grid)
     for i in range(len(duties)):
         for j in range(len(freqs)):
-            *_, dT = calculate_cell_metrics(F_grid[i, j], D_grid[i, j], mode, N_sets)
+            _, dT = calculate_cell_metrics(F_grid[i, j], D_grid[i, j], mode, N_sets)
             Z_grid[i, j] = dT
             
     # Calculate DC for plotting at f=0 boundary if desired
@@ -418,7 +402,7 @@ with tab1:
     
     fig.update_layout(
         title=dict(
-            text=f"Whole Bath Temperature Rise after {t_run_min} min ({N_sets} Sets, Current: {I_target} A, Volume: {vol_sol_L} L, Mode: {mode})",
+            text=f"Whole Bath {dT_axis} ({N_sets} Sets, Current: {I_target} A, Volume: {vol_sol_L} L, Mode: {mode})",
             font=dict(color="#09090b", size=14)
         ),
         scene=dict(
@@ -459,21 +443,32 @@ with tab1:
     
     # Physics observations based on current selection
     st.markdown("### Key Model Insights")
+    mt = ewm.mass_transfer_coefficients(flow_rate_L_min, temp_C, geom)
     if mode == "Constant Average Current":
         st.markdown(f"""
         - **Joule Heating Blowup**: Because the average current is fixed at **{I_target} A**, decreasing the duty cycle forces the peak current to rise as $I_{{peak}} = I_{{avg}}/D$. Ohmic heating increases quadratically with peak current ($I_{{peak}}^2 R$), resulting in a net Joule heating scaling of $1/D$. At $D = 0.05$, peak current is **{I_target/0.05:.0f} A**, causing a very steep temperature rise.
-        - **Frequency Flatness**: The surface is nearly flat along the frequency axis. This occurs because the electrical double-layer charges in microseconds ($\tau \approx 17\\ \\mu\\text{{s}}$) and the concentration diffusion layer relaxes slowly ($\\tau_{{diff}} \\approx 15\\ \\text{{s}}$). Both systems settle into steady-state cycles quickly, making frequency thermally neutral in the $1-60\\ \\text{{Hz}}$ range.
+        - **Frequency Flatness**: The surface is nearly flat along the frequency axis. This occurs because the electrical double-layer charges in microseconds ($\\tau \\approx 17\\ \\mu\\text{{s}}$) and the concentration diffusion layer relaxes slowly ($\\tau_{{jet}} \\approx {mt['tau_jet']:.1f}\\ \\text{{s}}$, $\\tau_{{dead}} \\approx {mt['tau_dead']:.0f}\\ \\text{{s}}$ at {flow_rate_L_min} L/min). Both systems settle into steady-state cycles quickly, making frequency thermally neutral in the $1-60\\ \\text{{Hz}}$ range.
         """)
     else:
         st.markdown(f"""
         - **Linear Heat Decrease**: Since the peak current is fixed at **{I_target} A**, reducing the duty cycle decreases the average current linearly ($I_{{avg}} = I_{{peak}} \\cdot D$). Both Joule heating ($D \\cdot I_{{peak}}^2 R$) and overpotential power drop linearly with $D$, causing the temperature rise to drop to nearly 0°C at very low duty cycles.
         - **Production Trade-off**: While a lower duty cycle reduces solution heating, it also reduces the copper deposition rate proportionally due to the lower average current.
         """)
+    J_lim_jet = 2.0 * ewm.F * mt['k_jet'] * (C_cu_g_L / ewm.M_cu) * 1000.0
+    J_peak_op = (I_target / A_plate) / D_pulse if mode == "Constant Average Current" else I_target / A_plate
+    if efficiency < 99.5:
+        st.markdown(f"""
+        - **Mass-Transfer Limit**: At {C_cu_g_L:.1f} g/L Cu and {flow_rate_L_min} L/min, the limiting current density is **{J_lim_jet:.1f} A/m²** in the jet zones and **{0.15 * J_lim_jet:.1f} A/m²** in the dead zones, below the **{J_peak_op:.0f} A/m²** peak current density. The excess current drives side reactions instead of copper deposition, which is why current efficiency is **{efficiency:.1f}%** at this operating point.
+        """)
+    else:
+        st.markdown(f"""
+        - **Mass-Transfer Limit**: At {C_cu_g_L:.1f} g/L Cu and {flow_rate_L_min} L/min, the limiting current density is **{J_lim_jet:.1f} A/m²** in the jet zones and **{0.15 * J_lim_jet:.1f} A/m²** in the dead zones (peak current density **{J_peak_op:.0f} A/m²**). The cathode surface does not deplete of copper during the pulses, so essentially all current deposits copper (efficiency **{efficiency:.1f}%**).
+        """)
 
 with tab2:
     st.subheader("Mathematical and Physical Framework")
     st.markdown(r"""
-    This simulator models the coupling of electrochemical reaction kinetics, mass transport, and thermal dynamics in a pulsed-current electrowinning cell system.
+    This simulator models the coupling of electrochemical reaction kinetics, mass transport, and thermal dynamics in a pulsed-current electrowinning cell system. All physics is computed by the core model in `pulsed_ew_model.py`, the same module used by the optimization scripts.
 
     ### 1. Cell Electrical Model and Overpotentials
     The transient voltage required to drive the electrowinning cell is modeled as:
@@ -494,9 +489,10 @@ with tab2:
         $$C_a \frac{d\eta_a}{dt} = I(t) - 2 I_{0,a}\sinh(\beta_a \eta_a)$$
         
     *   **Concentration Overpotential ($\eta_{conc}$)**: The voltage loss due to copper ion depletion at the cathode surface. It is governed by the Nernst equation:
-        $$\eta_{conc}(t) = -\frac{R_{gas} T_{ref}}{2F} \ln\left( \frac{C_s(t)}{C_b} \right)$$
-        Where the cathode surface concentration $C_s(t)$ is driven by the electrochemical reaction rate and replenished by Fickian boundary-layer diffusion:
-        $$\frac{dC_s}{dt} = \frac{C_b - C_s(t)}{\tau_{diff}} - \frac{I(t)}{2 F A_{plate} \delta}$$
+        $$\eta_{conc}(t) = -\frac{R_{gas} T}{2F} \ln\left( \frac{C_s(t)}{C_b} \right)$$
+        Where the cathode surface concentration $C_s(t)$ is driven by the electrochemical reaction rate and replenished by boundary-layer diffusion:
+        $$\frac{dC_s}{dt} = \frac{k(C_b - C_s(t))}{\delta} - \frac{J(t)}{2 F \delta}$$
+        The cathode is split into **jet zones** (electrolyte jets through the plate holes) and **dead zones**. The jet mass transfer coefficient comes from a Sherwood correlation $Sh = Re^{0.5} Sc^{0.33}$ using the flow rate and temperature-dependent viscosity and Cu diffusivity; dead zones use $k_{dead} = 0.15\,k_{jet}$. If the peak current density exceeds the limiting current $J_{lim} = 2 F k C_b$, the surface depletes to zero during the pulse and the excess current goes to side reactions, lowering the current efficiency.
         
     *   **Ohmic Resistance ($R_{sol}$)**: The resistance of the bulk sulfuric acid solution separating the electrodes:
         $$R_{sol} = \frac{d_{gap}}{\kappa_{cond} A_{plate}}$$
@@ -517,10 +513,15 @@ with tab2:
 
     *   **Endothermic Reaction Enthalpy Subtraction**: The chemical reaction absorbs energy. The net rate of heat generation is calculated by subtracting the reaction enthalpy, represented as a thermoneutral voltage ($E_{tn} = 1.15\text{ V}$):
         $$Q_{gen, total}(t) = Q_{joule, total}(t) + N_{sets} \cdot I(t) \cdot (\eta_a(t) + \eta_c(t) + \eta_{conc}(t) + E_{eq} - E_{tn})$$
+        All applied current crosses the electrode interfaces, so this uses the applied current whether it deposits copper or drives side reactions.
         
-    *   **Analytical Solution for Temperature Rise**: Integrating the thermal ODE yields the solution temperature rise over the operation duration $t$:
+    *   **Closed Bath (Transient)**: Integrating the thermal ODE yields the solution temperature rise over the operation duration $t$:
         $$\Delta T(t) = \frac{Q_{gen, avg}}{U A_{loss}} \left( 1 - \exp\left( -\frac{U A_{loss}}{m_{sol} C_p} t \right) \right)$$
         Where $Q_{gen, avg}$ is the average heat generation rate over a pulsing period.
+
+    *   **Continuous Flow (Steady State)**: Fresh electrolyte enters at $T_{in}$ with heat capacity rate $\dot{m} C_p$, giving the steady-state temperature:
+        $$T_{ss} = \frac{Q_{gen} + U A_{loss} T_{amb} + \dot{m} C_p T_{in}}{U A_{loss} + \dot{m} C_p}$$
+        The reported rise is $T_{ss} - T_{in}$, with $T_{amb} = 25\,^\circ\text{C}$.
         
     *   **Heat Loss Area ($A_{loss}$)**: Calculated based on the geometry of a rectangular tank containing $N_{sets}$ plates separated by gap $d_{gap}$:
         $$A_{loss} = 2 A_{plate} + 4 N_{sets} \sqrt{A_{plate}} d_{gap}$$
@@ -538,9 +539,11 @@ with tab2:
     | $I_{0,c}$ | Cathode Exchange Current | $10.0$ | $\text{A}$ | Kinematic charge transfer rate at cathode |
     | $I_{0,a}$ | Anode Exchange Current | $5.0$ | $\text{A}$ | Kinematic charge transfer rate at anode |
     | $\beta_c, \beta_a$ | Charge Transfer Coeff | $19.1$ | $\text{V}^{-1}$ | Kinetic symmetry factors ($\alpha F / R T$) |
-    | $C_b$ | Bulk Cu Concentration | $15.74$ | $\text{mol/m}^3$ | Bulk concentration of $\text{Cu}^{2+}$ ions ($1\text{ g/L}$) |
-    | $\tau_{diff}$ | Diffusion Time Constant | $15.0$ | $\text{s}$ | Concentration boundary layer relaxation time |
-    | $\delta$ | Boundary Layer Thickness | $10^{-4}$ | $\text{m}$ | Nernst diffusion boundary layer thickness |
+    | $C_b$ | Bulk Cu Concentration | Sidebar | $\text{g/L}$ | Bulk concentration of $\text{Cu}^{2+}$ ions |
+    | $T$ | Electrolyte Temperature | Sidebar | $^\circ\text{C}$ | Sets viscosity, density and Cu diffusivity |
+    | $Q$ | Electrolyte Flow Rate | Sidebar | $\text{L/min}$ | Sets jet velocity, mass transfer and flow cooling |
+    | $d_{hole}, p$ | Jet Hole Diameter, Pitch | $0.01, 0.02$ | $\text{m}$ | Cathode jet hole geometry |
+    | $D_{Cu}$ | Cu Diffusivity | $6.0 \times 10^{-10}$ at 25 °C | $\text{m}^2/\text{s}$ | Stokes-Einstein temperature correction |
     | $F$ | Faraday Constant | $96485$ | $\text{C/mol}$ | Charge per mole of electrons |
     | $R_{gas}$ | Universal Gas Constant | $8.314$ | $\text{J/(mol}\cdot\text{K)}$ | Ideal gas constant |
     | $\rho_{sol}$ | Electrolyte Density | $1140$ | $\text{kg/m}^3$ | Density of 20% $\text{H}_2\text{SO}_4$ solution |

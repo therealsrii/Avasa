@@ -1,6 +1,9 @@
 import math
 import numpy as np
 
+# Backward compatibility helper for NumPy 2.x trapezoid / trapz
+trapezoid = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
+
 # ==============================================================================
 # PHYSICAL CONSTANTS
 # ==============================================================================
@@ -151,7 +154,7 @@ def solve_pulsed_zone_efficiency(J_peak, J_lim, tau, T_on, T_off, C_bulk, temp_C
         Cs_vals = C_ss_on + (Cs_0 - C_ss_on) * np.exp(-t_vals / tau)
         Cs_vals = np.maximum(1e-4 * C_bulk, Cs_vals)
         eta_conc_vals = -(R_gas * T_K / (Z_cu * F)) * np.log(Cs_vals / C_bulk)
-        eta_conc_avg_on = np.trapz(eta_conc_vals, t_vals) / T_on
+        eta_conc_avg_on = trapezoid(eta_conc_vals, t_vals) / T_on
         
         return 1.0, C_s_avg_on, eta_conc_avg_on
         
@@ -198,7 +201,7 @@ def solve_pulsed_zone_efficiency(J_peak, J_lim, tau, T_on, T_off, C_bulk, temp_C
             Cs_vals = np.maximum(1e-4 * C_bulk, Cs_vals)
             
             eta_conc_vals = -(R_gas * T_K / (Z_cu * F)) * np.log(Cs_vals / C_bulk)
-            eta_conc_avg_on = np.trapz(eta_conc_vals, t_vals) / T_on
+            eta_conc_avg_on = trapezoid(eta_conc_vals, t_vals) / T_on
             
             return efficiency, C_s_avg_on, eta_conc_avg_on
             
@@ -215,7 +218,7 @@ def solve_pulsed_zone_efficiency(J_peak, J_lim, tau, T_on, T_off, C_bulk, temp_C
             Cs_vals = C_ss_on + (Cs_0 - C_ss_on) * np.exp(-t_vals / tau)
             Cs_vals = np.maximum(1e-4 * C_bulk, Cs_vals)
             eta_conc_vals = -(R_gas * T_K / (Z_cu * F)) * np.log(Cs_vals / C_bulk)
-            eta_conc_avg_on = np.trapz(eta_conc_vals, t_vals) / T_on
+            eta_conc_avg_on = trapezoid(eta_conc_vals, t_vals) / T_on
             
             return 1.0, C_s_avg_on, eta_conc_avg_on
 
@@ -522,9 +525,13 @@ def calculate_sx_circuit(c_in, q_out, c_out, ketoxime_pct=10.0, naoh_sol_conc=20
 # ==============================================================================
 # PULSED CURRENT HEAT GENERATION MODEL
 # ==============================================================================
-def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=None, electrical_params=None):
+def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=None, electrical_params=None, flow_rate_L_min=150.0):
     """
     Calculates the individual components of average heat generation rate (W) in the cell.
+    
+    Each active cathode face (n_faces) faces one anode across one inter-electrode gap,
+    so the bath is modeled as n_faces identical cells in parallel, each carrying
+    J_avg * plate_area of current.
     
     Parameters:
     J_avg (float): Average applied current density (A/m^2).
@@ -533,10 +540,13 @@ def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=No
     temp_C (float): Temperature in Celsius.
     C_in_g_L (float): Copper concentration in g/L.
     geom (dict, optional): Cell geometry settings.
-    electrical_params (dict, optional): Contact, plate, solution resistances, kinetics.
+    electrical_params (dict, optional): Contact, plate, solution resistances, kinetics, gap.
+        Any keys omitted fall back to the defaults below.
+    flow_rate_L_min (float, optional): Electrolyte flow rate in L/min (drives mass transfer).
     
     Returns:
-    dict: Heat generation terms (Joule, Overpotentials, Chemical, Total) in Watts.
+    dict: Heat generation terms (Joule, Overpotentials, Chemical, Total) in Watts,
+          plus peak cell voltages, applied current, efficiency and copper production.
     """
     if geom is None:
         geom = {
@@ -546,38 +556,38 @@ def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=No
             'pitch': 0.02,
             'n_faces': 160
         }
-    if electrical_params is None:
-        electrical_params = {
-            'kappa_cond': 70.0,
-            'R_contact': 0.0001,
-            'R_plate': 0.00005,
-            'R_peripheral': 0.00002,
-            'f_contact': 0.5,
-            'E_eq': 0.89,
-            'E_tn': 1.15,
-            'I0_c': 10.0,  # Cathode exchange current (A) for 1 m^2 plate area
-            'I0_a': 5.0,   # Anode exchange current (A) for 1 m^2 plate area
-            'beta_c': 19.1,
-            'beta_a': 19.1
-        }
+    default_params = {
+        'kappa_cond': 70.0,
+        'd_gap': 0.05, # Anode-cathode gap (m)
+        'R_contact': 0.0001,
+        'R_plate': 0.00005,
+        'R_peripheral': 0.00002,
+        'f_contact': 0.5,
+        'E_eq': 0.89,
+        'E_tn': 1.15,
+        'I0_c': 10.0,  # Cathode exchange current (A) for 1 m^2 plate area
+        'I0_a': 5.0,   # Anode exchange current (A) for 1 m^2 plate area
+        'beta_c': 19.1,
+        'beta_a': 19.1
+    }
+    electrical_params = {**default_params, **(electrical_params or {})}
         
     plate_width = geom['plate_width']
     plate_length = geom['plate_length']
     n_faces = geom['n_faces']
     plate_area = plate_width * plate_length
     
-    n_plates = n_faces / 2.0
-    A_total = n_faces * plate_area
-    I_avg = J_avg * A_total
+    # Current carried by a single anode-cathode cell (A)
+    I_cell_avg = J_avg * plate_area
     
-    # Calculate Solution resistance
-    d_gap = 0.05 # default gap (m)
-    R_sol = d_gap / (electrical_params['kappa_cond'] * plate_area)
+    # Calculate Solution resistance of a single cell gap
+    R_sol = electrical_params['d_gap'] / (electrical_params['kappa_cond'] * plate_area)
     
+    R_extra_voltage = electrical_params['R_plate'] + electrical_params['R_contact'] + electrical_params['R_peripheral']
     R_extra_heating = electrical_params['R_plate'] + electrical_params['f_contact'] * electrical_params['R_contact']
     
     # Get pulsed metrics
-    metrics = calculate_pulsed_ew_metrics(J_avg, f_pulse, D_pulse, 150.0, temp_C, C_in_g_L, geom)
+    metrics = calculate_pulsed_ew_metrics(J_avg, f_pulse, D_pulse, flow_rate_L_min, temp_C, C_in_g_L, geom)
     
     # Activation kinetics exchange current density (A/m^2)
     J0_c = electrical_params['I0_c'] / plate_area
@@ -586,38 +596,31 @@ def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=No
     beta_c = electrical_params['beta_c']
     beta_a = electrical_params['beta_a']
     
+    # Effective duty cycle (continuous DC is D = 1)
+    D_eff = 1.0 if (f_pulse == 0.0 or D_pulse >= 1.0) else D_pulse
+    
     # Calculate average overpotentials during 'on' time
-    if f_pulse == 0.0 or D_pulse >= 1.0:
-        J_peak = J_avg
-        eta_c_on = (1.0 / beta_c) * np.arcsinh(J_peak / (2.0 * J0_c))
-        eta_a_on = (1.0 / beta_a) * np.arcsinh(J_peak / (2.0 * J0_a))
-        eta_conc_on = 0.5 * (metrics['eta_conc_jet'] + metrics['eta_conc_dead'])  # average conc overpotential
-        
-        Q_joule_sol = n_plates * (I_avg**2 * R_sol)
-        Q_joule_extra = n_plates * (I_avg**2 * R_extra_heating)
-        Q_joule = Q_joule_sol + Q_joule_extra
-        
-        I_actual_avg = metrics['I_actual']
-        Q_over = I_actual_avg * (eta_c_on + eta_a_on + eta_conc_on)
-        Q_chem = I_actual_avg * (electrical_params['E_eq'] - electrical_params['E_tn'])
-        Q_total = Q_joule + Q_over + Q_chem
-    else:
-        J_peak = J_avg / D_pulse
-        eta_c_on = (1.0 / beta_c) * np.arcsinh(J_peak / (2.0 * J0_c))
-        eta_a_on = (1.0 / beta_a) * np.arcsinh(J_peak / (2.0 * J0_a))
-        eta_conc_on = 0.5 * (metrics['eta_conc_jet'] + metrics['eta_conc_dead'])
-        
-        I_peak = I_avg / D_pulse
-        
-        # Joule heating under pulsing: average power is D * I_peak^2 * R
-        Q_joule_sol = n_plates * (D_pulse * I_peak**2 * R_sol)
-        Q_joule_extra = n_plates * (D_pulse * I_peak**2 * R_extra_heating)
-        Q_joule = Q_joule_sol + Q_joule_extra
-        
-        I_actual_avg = metrics['I_actual']
-        Q_over = I_actual_avg * (eta_c_on + eta_a_on + eta_conc_on)
-        Q_chem = I_actual_avg * (electrical_params['E_eq'] - electrical_params['E_tn'])
-        Q_total = Q_joule + Q_over + Q_chem
+    J_peak = J_avg / D_eff
+    I_cell_peak = I_cell_avg / D_eff
+    eta_c_on = (1.0 / beta_c) * np.arcsinh(J_peak / (2.0 * J0_c))
+    eta_a_on = (1.0 / beta_a) * np.arcsinh(J_peak / (2.0 * J0_a))
+    eta_conc_on = 0.5 * (metrics['eta_conc_jet'] + metrics['eta_conc_dead'])  # average conc overpotential
+    
+    # Joule heating per cell under pulsing: average power is D * I_peak^2 * R, summed over all cells
+    Q_joule_sol = n_faces * (D_eff * I_cell_peak**2 * R_sol)
+    Q_joule_extra = n_faces * (D_eff * I_cell_peak**2 * R_extra_heating)
+    Q_joule = Q_joule_sol + Q_joule_extra
+    
+    # All applied current crosses the electrode interfaces, whether it deposits copper or drives
+    # side reactions, so overpotential and reaction-enthalpy heat use the applied current.
+    I_app_total = n_faces * I_cell_avg
+    Q_over = I_app_total * (eta_c_on + eta_a_on + eta_conc_on)
+    Q_chem = I_app_total * (electrical_params['E_eq'] - electrical_params['E_tn'])
+    Q_total = Q_joule + Q_over + Q_chem
+    
+    # Peak cell voltage during the 'on' pulse
+    V_cell_peak_internal = electrical_params['E_eq'] + eta_a_on + eta_c_on + eta_conc_on + I_cell_peak * R_sol
+    V_cell_peak_total = V_cell_peak_internal + I_cell_peak * R_extra_voltage
         
     return {
         'Q_joule_sol_W': Q_joule_sol,
@@ -625,5 +628,9 @@ def calculate_heat_generation(J_avg, f_pulse, D_pulse, temp_C, C_in_g_L, geom=No
         'Q_overpotential_W': Q_over,
         'Q_chemical_W': Q_chem,
         'Q_total_W': Q_total,
-        'efficiency_percent': metrics['efficiency_percent']
+        'V_cell_peak_internal_V': V_cell_peak_internal,
+        'V_cell_peak_total_V': V_cell_peak_total,
+        'I_applied_A': I_app_total,
+        'efficiency_percent': metrics['efficiency_percent'],
+        'copper_g_min': metrics['copper_g_min']
     }

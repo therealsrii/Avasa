@@ -1,5 +1,3 @@
-import sys
-sys.path.insert(0, '/Users/sridaranrajagopal/Documents/Fun_project/Heating_problem')
 
 import numpy as np
 from scipy.optimize import differential_evolution
@@ -79,7 +77,8 @@ def objective(x):
         temp_C=temp_inlet,
         C_in_g_L=3.0,
         geom=geom,
-        electrical_params=electrical_params
+        electrical_params=electrical_params,
+        flow_rate_L_min=flow_rate
     )
     Q_gen = heat_terms['Q_total_W']
     
@@ -156,7 +155,8 @@ def run_optimization():
         D_pulse=opt_D_pulse,
         temp_C=opt_temp_inlet,
         C_in_g_L=3.0,
-        geom=geom
+        geom=geom,
+        flow_rate_L_min=opt_flow_rate
     )
     Q_gen = heat_terms['Q_total_W']
     

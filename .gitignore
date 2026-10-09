@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 temperature_rise_surf_plots.png
 .DS_Store
+venv/
