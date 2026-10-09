@@ -133,8 +133,12 @@ R_peripheral_mohm = st.sidebar.slider("Peripheral/Busbar Resistance (mΩ)", min_
 f_contact_heat_pct = st.sidebar.slider("Contact Heat Conducted to Bath (%)", min_value=0.0, max_value=100.0, value=50.0, step=5.0, help="Percentage of the contact resistance heat that conducts into the electrolyte bath via the hanger bars.")
 
 st.sidebar.subheader("Pulsing Parameters")
-f_pulse = st.sidebar.slider("Pulsing Frequency (Hz)", min_value=1.0, max_value=60.0, value=30.0, step=1.0, help="Operating pulsing frequency of the current.")
+f_pulse = st.sidebar.slider("Pulsing Frequency (Hz)", min_value=1.0, max_value=1000.0, value=30.0, step=1.0, help="Operating pulsing frequency of the current.")
 D_pulse = st.sidebar.slider("Duty Cycle (D)", min_value=0.05, max_value=1.0, value=0.75, step=0.05, help="Operating duty cycle of the pulses.")
+
+st.sidebar.subheader("Production Schedule")
+hours_per_day = st.sidebar.slider("Operating Hours per Day", min_value=1, max_value=24, value=12, step=1, help="Hours of electrowinning operation per day.")
+days_per_year = st.sidebar.slider("Operating Days per Year", min_value=1, max_value=365, value=365, step=1, help="Days of operation per year. The yearly yield assumes the copper concentration is held constant (e.g. continuously replenished by solvent extraction).")
 
 st.sidebar.subheader("Rectifier")
 I_rect_max = st.sidebar.slider("Rectifier Max Current (A)", min_value=500, max_value=10000, value=4500, step=100, help="Rated output current of the rectifier. All electrode sets are fed in parallel, so it must supply the peak current of every set at once.")
@@ -246,6 +250,11 @@ P_chem = heat['Q_chemical_W']
 P_gen = heat['Q_total_W']
 efficiency = heat['efficiency_percent']
 copper_kg_hr = heat['copper_g_min'] * 60.0 / 1000.0
+hours_per_year = hours_per_day * days_per_year
+copper_kg_yr = copper_kg_hr * hours_per_year
+# Faraday's law limit: every applied amp deposits copper
+copper_kg_hr_max = heat['I_applied_A'] * ewm.M_cu / (ewm.Z_cu * ewm.F) * 3600.0 / 1000.0
+copper_kg_yr_max = copper_kg_hr_max * hours_per_year
 
 if thermal_mode == "Closed Bath (Transient)":
     dT_caption = f"Temperature Rise after <b>{t_run_min} min</b> of operation"
@@ -268,6 +277,23 @@ st.markdown(f"""
         <div style="text-align: right; min-width: 200px;">
             <div style="font-size: 1.5rem; font-weight: 700; color: #09090b;">{P_gen/1000.0:.2f} kW</div>
             <div style="font-size: 0.85rem; color: #4b5563; margin-top: 2px;">Total Heat Generation Rate</div>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# Callout box for the yearly copper production forecast
+st.markdown(f"""
+<div class="metric-card" style="background-color: #f0fdf4; border: 1px solid #dcfce7; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+    <div style="font-size: 0.875rem; font-weight: 700; color: #15803d; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">Yearly Copper Yield ({hours_per_day} h/day × {days_per_year} days = {hours_per_year:,} h)</div>
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+        <div>
+            <div style="font-size: 2.25rem; font-weight: 800; color: #166534; letter-spacing: -0.03em;">{copper_kg_yr:,.0f} kg/yr</div>
+            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 2px;">{copper_kg_hr:.3f} kg/h at {efficiency:.1f}% current efficiency ({C_cu_g_L:.1f} g/L Cu held constant)</div>
+        </div>
+        <div style="text-align: right; min-width: 200px;">
+            <div style="font-size: 1.5rem; font-weight: 700; color: #09090b;">{copper_kg_yr_max:,.0f} kg/yr</div>
+            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 2px;">Upper limit at 100% efficiency</div>
         </div>
     </div>
 </div>
@@ -344,7 +370,7 @@ with tab1:
     st.subheader(f"3D Thermal Surface Plot ({mode})")
     
     # Generate Grid
-    freqs = np.linspace(1.0, 60.0, 25)
+    freqs = np.logspace(0.0, 3.0, 25)  # 1 to 1000 Hz
     duties = np.linspace(0.05, 1.0, 25)
     F_grid, D_grid = np.meshgrid(freqs, duties)
     
@@ -356,13 +382,14 @@ with tab1:
             Z_grid[i, j] = dT
             
     # Calculate DC for plotting at f=0 boundary if desired
-    # For neatness, we keep the surface bound within 1-60 Hz but show DC as reference in text.
+    # The surface spans the 1-1000 Hz slider range on a log axis.
     
     # Create Plotly 3D Surface
     colorscale = 'Magma' if mode == "Constant Average Current" else 'Viridis'
     
     fig = go.Figure(data=[go.Surface(
-        x=F_grid,
+        x=np.log10(F_grid),
+        customdata=F_grid,
         y=D_grid,
         z=Z_grid,
         colorscale=colorscale,
@@ -371,7 +398,7 @@ with tab1:
             tickfont=dict(color="#27272a", size=10)
         ),
         hovertemplate=(
-            "Frequency: %{x:.1f} Hz<br>" +
+            "Frequency: %{customdata:.1f} Hz<br>" +
             "Duty Cycle: %{y:.2f}<br>" +
             "Temp Rise: %{z:.3f} °C<br>" +
             "<extra></extra>"
@@ -380,7 +407,8 @@ with tab1:
     
     # Add a marker point on the surface representing the current operating point selected via the sliders
     fig.add_trace(go.Scatter3d(
-        x=[f_pulse],
+        x=[np.log10(f_pulse)],
+        customdata=[f_pulse],
         y=[D_pulse],
         z=[dT_final],
         mode='markers',
@@ -393,7 +421,7 @@ with tab1:
         name='Operating Point',
         hovertemplate=(
             "Current Operating Point:<br>" +
-            "Frequency: %{x:.1f} Hz<br>" +
+            "Frequency: %{customdata:.1f} Hz<br>" +
             "Duty Cycle: %{y:.2f}<br>" +
             "Temp Rise: %{z:.3f} °C<br>" +
             "<extra></extra>"
@@ -408,6 +436,8 @@ with tab1:
         scene=dict(
             xaxis=dict(
                 title=dict(text="Pulsing Frequency (Hz)", font=dict(color="#09090b", size=12)),
+                tickvals=[0, 1, np.log10(60), 2, 3],
+                ticktext=["1", "10", "60", "100", "1000"],
                 tickfont=dict(color="#27272a", size=10),
                 gridcolor="rgb(200, 200, 200)",
                 showbackground=True,
@@ -447,7 +477,7 @@ with tab1:
     if mode == "Constant Average Current":
         st.markdown(f"""
         - **Joule Heating Blowup**: Because the average current is fixed at **{I_target} A**, decreasing the duty cycle forces the peak current to rise as $I_{{peak}} = I_{{avg}}/D$. Ohmic heating increases quadratically with peak current ($I_{{peak}}^2 R$), resulting in a net Joule heating scaling of $1/D$. At $D = 0.05$, peak current is **{I_target/0.05:.0f} A**, causing a very steep temperature rise.
-        - **Frequency Flatness**: The surface is nearly flat along the frequency axis. This occurs because the electrical double-layer charges in microseconds ($\\tau \\approx 17\\ \\mu\\text{{s}}$) and the concentration diffusion layer relaxes slowly ($\\tau_{{jet}} \\approx {mt['tau_jet']:.1f}\\ \\text{{s}}$, $\\tau_{{dead}} \\approx {mt['tau_dead']:.0f}\\ \\text{{s}}$ at {flow_rate_L_min} L/min). Both systems settle into steady-state cycles quickly, making frequency thermally neutral in the $1-60\\ \\text{{Hz}}$ range.
+        - **Frequency Flatness**: The surface is nearly flat along the frequency axis. This occurs because the electrical double-layer charges in microseconds ($\\tau \\approx 17\\ \\mu\\text{{s}}$) and the concentration diffusion layer relaxes slowly ($\\tau_{{jet}} \\approx {mt['tau_jet']:.1f}\\ \\text{{s}}$, $\\tau_{{dead}} \\approx {mt['tau_dead']:.0f}\\ \\text{{s}}$ at {flow_rate_L_min} L/min). Both systems settle into steady-state cycles quickly, making frequency thermally neutral in the $1-1000\\ \\text{{Hz}}$ range.
         """)
     else:
         st.markdown(f"""
@@ -459,6 +489,7 @@ with tab1:
     if efficiency < 99.5:
         st.markdown(f"""
         - **Mass-Transfer Limit**: At {C_cu_g_L:.1f} g/L Cu and {flow_rate_L_min} L/min, the limiting current density is **{J_lim_jet:.1f} A/m²** in the jet zones and **{0.15 * J_lim_jet:.1f} A/m²** in the dead zones, below the **{J_peak_op:.0f} A/m²** peak current density. The excess current drives side reactions instead of copper deposition, which is why current efficiency is **{efficiency:.1f}%** at this operating point.
+        - **Why Frequency Does Not Help**: Averaged over time, copper can reach the cathode no faster than the limiting current allows, no matter how the current is pulsed. Pulsing only changes how the current is distributed in time. To raise efficiency, increase copper concentration, flow rate or temperature (raises the limit), or add plate area (lowers the current density).
         """)
     else:
         st.markdown(f"""
