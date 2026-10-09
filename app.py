@@ -257,9 +257,6 @@ efficiency = heat['efficiency_percent']
 copper_kg_hr = heat['copper_g_min'] * 60.0 / 1000.0
 hours_per_year = hours_per_day * days_per_year
 copper_kg_yr = copper_kg_hr * hours_per_year
-# Faraday's law limit: every applied amp deposits copper
-copper_kg_hr_max = heat['I_applied_A'] * ewm.M_cu / (ewm.Z_cu * ewm.F) * 3600.0 / 1000.0
-copper_kg_yr_max = copper_kg_hr_max * hours_per_year
 
 if thermal_mode == "Closed Bath (Transient)":
     dT_caption = f"Temperature Rise after <b>{t_run_min} min</b> of operation"
@@ -295,10 +292,6 @@ st.markdown(f"""
         <div>
             <div style="font-size: 2.25rem; font-weight: 800; color: #166534; letter-spacing: -0.03em;">{copper_kg_yr:,.0f} kg/yr</div>
             <div style="font-size: 0.85rem; color: #4b5563; margin-top: 2px;">{copper_kg_hr:.3f} kg/h at {efficiency:.1f}% current efficiency ({C_cu_g_L:.1f} g/L Cu held constant)</div>
-        </div>
-        <div style="text-align: right; min-width: 200px;">
-            <div style="font-size: 1.5rem; font-weight: 700; color: #09090b;">{copper_kg_yr_max:,.0f} kg/yr</div>
-            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 2px;">Upper limit at 100% efficiency</div>
         </div>
     </div>
 </div>
